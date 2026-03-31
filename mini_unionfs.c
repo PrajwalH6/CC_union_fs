@@ -200,6 +200,18 @@ static int unionfs_mkdir(const char *path, mode_t mode) {
     return 0;
 }
 
+/* ===== RMDIR ===== */
+static int unionfs_rmdir(const char *path) {
+    char upper_path[1024];
+    build_path(upper_path, STATE->upper, path);
+
+    int res = rmdir(upper_path);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
     .readdir = unionfs_readdir,
@@ -208,6 +220,7 @@ static struct fuse_operations unionfs_oper = {
     .unlink = unionfs_unlink,
     .create = unionfs_create,
     .mkdir = unionfs_mkdir,
+    .rmdir = unionfs_rmdir,
 };
 
 int main(int argc, char *argv[]) {

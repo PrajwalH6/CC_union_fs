@@ -175,7 +175,7 @@ static int unionfs_unlink(const char *path) {
     return -ENOENT;
 }
 
-/* ================= NEW: CREATE ================= */
+/* ===== CREATE ===== */
 static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
     char upper_path[1024];
     build_path(upper_path, STATE->upper, path);
@@ -188,6 +188,18 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
     return 0;
 }
 
+/* ===== MKDIR ===== */
+static int unionfs_mkdir(const char *path, mode_t mode) {
+    char upper_path[1024];
+    build_path(upper_path, STATE->upper, path);
+
+    int res = mkdir(upper_path, mode);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
     .readdir = unionfs_readdir,
@@ -195,6 +207,7 @@ static struct fuse_operations unionfs_oper = {
     .write = unionfs_write,
     .unlink = unionfs_unlink,
     .create = unionfs_create,
+    .mkdir = unionfs_mkdir,
 };
 
 int main(int argc, char *argv[]) {

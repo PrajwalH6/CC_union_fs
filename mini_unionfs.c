@@ -175,12 +175,26 @@ static int unionfs_unlink(const char *path) {
     return -ENOENT;
 }
 
+/* ================= NEW: CREATE ================= */
+static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+    char upper_path[1024];
+    build_path(upper_path, STATE->upper, path);
+
+    int fd = open(upper_path, fi->flags, mode);
+    if (fd == -1)
+        return -errno;
+
+    close(fd);
+    return 0;
+}
+
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
     .readdir = unionfs_readdir,
     .read = unionfs_read,
     .write = unionfs_write,
     .unlink = unionfs_unlink,
+    .create = unionfs_create,
 };
 
 int main(int argc, char *argv[]) {

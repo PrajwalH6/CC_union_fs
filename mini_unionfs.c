@@ -182,6 +182,39 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return 0;
 }
 
+/*
+ * unionfs_open: called by FUSE before every read or write.
+ *
+ * For write-mode opens (O_WRONLY / O_RDWR), we trigger CoW here — before
+ * any write() call arrives — so that write() always finds the file already
+ * present in upper and never has to think about lower.
+ *
+ * For read-only opens we just verify the file is visible (not whiteouted).
+ * This is the correct place for CoW rather than lazily inside write(),
+ * because open() is guaranteed to fire first and only once per file handle.
+ */
+static int unionfs_open(const char *path, struct fuse_file_info *fi) {
+    char upper_path[1024], resolved[1024];
+
+    build_path(upper_path, STATE->upper, path);
+
+    if (fi->flags & (O_WRONLY | O_RDWR)) {
+        /* Write path: bring file into upper if it is lower-only */
+        if (access(upper_path, F_OK) != 0) {
+            if (resolve_path(path, resolved) == 0)
+                copy_to_upper(path);
+            else
+                return -ENOENT;
+        }
+    } else {
+        /* Read path: just confirm the file exists and is not whiteouted */
+        if (resolve_path(path, resolved) != 0)
+            return -ENOENT;
+    }
+
+    return 0;
+}
+
 static int unionfs_read(const char *path, char *buf, size_t size, off_t offset,
                         struct fuse_file_info *fi) {
     char resolved[1024];
@@ -277,6 +310,7 @@ static int unionfs_rmdir(const char *path) {
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
     .readdir = unionfs_readdir,
+    .open    = unionfs_open,
     .read    = unionfs_read,
     .write   = unionfs_write,
     .unlink  = unionfs_unlink,

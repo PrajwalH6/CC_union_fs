@@ -244,14 +244,15 @@ static int unionfs_write(const char *path, const char *buf, size_t size,
             copy_to_upper(path);
     }
 
-    int fd = open(upper_path, O_WRONLY);
+    /* O_CREAT: safety net in case copy_to_upper failed silently */
+    int fd = open(upper_path, O_WRONLY | O_CREAT, 0644);
     if (fd == -1)
         return -errno;
 
     int res = pwrite(fd, buf, size, offset);
     close(fd);
 
-    return res;
+    return (res == -1) ? -errno : res;
 }
 
 static int unionfs_unlink(const char *path) {

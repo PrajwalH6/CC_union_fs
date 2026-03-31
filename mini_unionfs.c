@@ -53,13 +53,53 @@ int resolve_path(const char *path, char *resolved) {
     return -ENOENT;
 }
 
+/*
+ * ensure_upper_dirs: walks every component of `path` and calls mkdir()
+ * for each directory level under STATE->upper, so that a nested file
+ * like /subdir/file.txt can be created as upper/subdir/file.txt without
+ * the open() failing because upper/subdir/ does not exist yet.
+ */
+void ensure_upper_dirs(const char *path) {
+    char tmp[1024];
+    build_path(tmp, STATE->upper, path);
+
+    /* start just past the upper prefix so we don't try to mkdir upper itself */
+    for (char *p = tmp + strlen(STATE->upper) + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);   /* silently ignore EEXIST */
+            *p = '/';
+        }
+    }
+}
+
+/*
+ * copy_to_upper: copies a file from lower to upper for Copy-on-Write.
+ * Changes from original:
+ *   1. Calls ensure_upper_dirs() so parent directories always exist.
+ *   2. Reads source permissions via stat() and preserves them on the copy.
+ *   3. Opens dst with O_TRUNC so stale content is never left behind.
+ */
 void copy_to_upper(const char *path) {
     char lower_path[1024], upper_path[1024];
     build_path(lower_path, STATE->lower, path);
     build_path(upper_path, STATE->upper, path);
 
+    ensure_upper_dirs(path);
+
+    struct stat st;
+    if (stat(lower_path, &st) == -1)
+        return;
+
     int src = open(lower_path, O_RDONLY);
-    int dst = open(upper_path, O_WRONLY | O_CREAT, 0644);
+    if (src == -1)
+        return;
+
+    int dst = open(upper_path, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode);
+    if (dst == -1) {
+        close(src);
+        return;
+    }
 
     char buf[4096];
     int n;
@@ -84,7 +124,6 @@ static int unionfs_getattr(const char *path, struct stat *stbuf, struct fuse_fil
     return 0;
 }
 
-/* ===== FIXED READDIR ===== */
 static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                            off_t offset, struct fuse_file_info *fi,
                            enum fuse_readdir_flags flags) {
@@ -96,28 +135,24 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
 
-    // Track files already added (from upper)
     char seen[256][256];
     int seen_count = 0;
 
-    // ---------- UPPER ----------
+    /* ---------- UPPER ---------- */
     build_path(dirpath, STATE->upper, path);
     dp = opendir(dirpath);
 
     if (dp) {
         while ((de = readdir(dp)) != NULL) {
-
-            // skip whiteout files
             if (strncmp(de->d_name, ".wh.", 4) == 0)
                 continue;
-
             strcpy(seen[seen_count++], de->d_name);
             filler(buf, de->d_name, NULL, 0, 0);
         }
         closedir(dp);
     }
 
-    // ---------- LOWER ----------
+    /* ---------- LOWER ---------- */
     build_path(dirpath, STATE->lower, path);
     dp = opendir(dirpath);
 
@@ -126,7 +161,6 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
             int skip = 0;
 
-            // skip if already in upper
             for (int i = 0; i < seen_count; i++) {
                 if (strcmp(seen[i], de->d_name) == 0) {
                     skip = 1;
@@ -134,7 +168,6 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 }
             }
 
-            // skip if whiteout exists
             char whiteout[1024];
             get_whiteout_path(de->d_name, whiteout);
             if (access(whiteout, F_OK) == 0)
@@ -244,12 +277,12 @@ static int unionfs_rmdir(const char *path) {
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
     .readdir = unionfs_readdir,
-    .read = unionfs_read,
-    .write = unionfs_write,
-    .unlink = unionfs_unlink,
-    .create = unionfs_create,
-    .mkdir = unionfs_mkdir,
-    .rmdir = unionfs_rmdir,
+    .read    = unionfs_read,
+    .write   = unionfs_write,
+    .unlink  = unionfs_unlink,
+    .create  = unionfs_create,
+    .mkdir   = unionfs_mkdir,
+    .rmdir   = unionfs_rmdir,
 };
 
 int main(int argc, char *argv[]) {

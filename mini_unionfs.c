@@ -84,9 +84,11 @@ static int unionfs_getattr(const char *path, struct stat *stbuf, struct fuse_fil
     return 0;
 }
 
+/* ===== FIXED READDIR ===== */
 static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                            off_t offset, struct fuse_file_info *fi,
                            enum fuse_readdir_flags flags) {
+
     DIR *dp;
     struct dirent *de;
     char dirpath[1024];
@@ -94,21 +96,51 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
 
-    build_path(dirpath, STATE->lower, path);
-    dp = opendir(dirpath);
+    // Track files already added (from upper)
+    char seen[256][256];
+    int seen_count = 0;
 
-    if (dp) {
-        while ((de = readdir(dp)) != NULL)
-            filler(buf, de->d_name, NULL, 0, 0);
-        closedir(dp);
-    }
-
+    // ---------- UPPER ----------
     build_path(dirpath, STATE->upper, path);
     dp = opendir(dirpath);
 
     if (dp) {
         while ((de = readdir(dp)) != NULL) {
-            if (strncmp(de->d_name, ".wh.", 4) != 0)
+
+            // skip whiteout files
+            if (strncmp(de->d_name, ".wh.", 4) == 0)
+                continue;
+
+            strcpy(seen[seen_count++], de->d_name);
+            filler(buf, de->d_name, NULL, 0, 0);
+        }
+        closedir(dp);
+    }
+
+    // ---------- LOWER ----------
+    build_path(dirpath, STATE->lower, path);
+    dp = opendir(dirpath);
+
+    if (dp) {
+        while ((de = readdir(dp)) != NULL) {
+
+            int skip = 0;
+
+            // skip if already in upper
+            for (int i = 0; i < seen_count; i++) {
+                if (strcmp(seen[i], de->d_name) == 0) {
+                    skip = 1;
+                    break;
+                }
+            }
+
+            // skip if whiteout exists
+            char whiteout[1024];
+            get_whiteout_path(de->d_name, whiteout);
+            if (access(whiteout, F_OK) == 0)
+                skip = 1;
+
+            if (!skip)
                 filler(buf, de->d_name, NULL, 0, 0);
         }
         closedir(dp);
@@ -175,7 +207,6 @@ static int unionfs_unlink(const char *path) {
     return -ENOENT;
 }
 
-/* ===== CREATE ===== */
 static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
     char upper_path[1024];
     build_path(upper_path, STATE->upper, path);
@@ -188,7 +219,6 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
     return 0;
 }
 
-/* ===== MKDIR ===== */
 static int unionfs_mkdir(const char *path, mode_t mode) {
     char upper_path[1024];
     build_path(upper_path, STATE->upper, path);
@@ -200,7 +230,6 @@ static int unionfs_mkdir(const char *path, mode_t mode) {
     return 0;
 }
 
-/* ===== RMDIR ===== */
 static int unionfs_rmdir(const char *path) {
     char upper_path[1024];
     build_path(upper_path, STATE->upper, path);

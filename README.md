@@ -1,177 +1,71 @@
 # Mini Union File System using FUSE
 
-## Overview
+## Project Overview
 
-This project implements a **Mini Union File System (MiniUnionFS)** using **FUSE (Filesystem in Userspace)** in C.
+This project implements a **Mini Union File System** using **FUSE (Filesystem in Userspace)** in C.
 
-A union file system combines two directories:
+A union file system combines two separate directory layers into one virtual mounted filesystem:
 
-* **Lower directory** → read-only base layer
-* **Upper directory** → writable layer
+* **Lower Layer** → acts as the base read-only directory
+* **Upper Layer** → stores modified and newly written files
 
-The mounted filesystem presents a merged view of both directories.
+The mounted filesystem presents a merged view of both layers to the user.
 
-This implementation supports:
+The project follows the **copy-on-write mechanism**, where files from the lower layer are copied to the upper layer before modification.
 
-* File attribute retrieval
-* Directory listing
-* File reading
-* File writing
-* File deletion using whiteout mechanism
+It also uses a **whiteout mechanism** to logically delete files from the lower layer without modifying original data.
 
 ---
 
-## Concept
+## My Contribution
 
-The filesystem works using **copy-on-write**:
+This module implements the core filesystem operations required for basic union filesystem functionality.
 
-* If a file exists only in the lower layer and is modified,
-* it is first copied to the upper layer,
-* then modifications are applied.
+### Implemented Features
 
-Deletion of lower-layer files is handled using **whiteout files**:
-
-* A hidden file named `.wh.filename` is created in the upper layer
-* This hides the corresponding file from the lower layer
-
----
-
-## Features Implemented
-
-### 1. getattr
-
-Retrieves file metadata using `lstat()`.
-
-### 2. readdir
-
-Reads directory contents from:
-
-* lower layer
-* upper layer
-
-Whiteout files are ignored during listing.
-
-### 3. read
-
-Reads file data from:
-
-* upper layer if present
-* otherwise lower layer
-
-### 4. write
-
-Implements copy-on-write:
-
-* copies lower file to upper layer if needed
-* writes only to upper layer
-
-### 5. unlink
-
-Deletes files:
-
-* directly removes from upper layer if present
-* creates whiteout file if file exists only in lower layer
+* File attribute retrieval (`getattr`)
+* Directory listing (`readdir`)
+* File read operation (`read`)
+* File write operation (`write`)
+* File deletion (`unlink`)
 
 ---
 
-## Project Structure
+## Working Principle
 
-```bash
-mini_unionfs.c
-README.md
-lower/
-upper/
-mount/
-```
+### Path Resolution
 
----
+For every file request:
 
-## Compilation
-
-Compile using:
-
-```bash
-gcc mini_unionfs.c -o mini_unionfs `pkg-config fuse3 --cflags --libs`
-```
+1. Check upper layer first
+2. If not found, check lower layer
+3. If whiteout file exists, treat file as deleted
 
 ---
 
-## Running the Filesystem
+### Copy-on-Write Mechanism
 
-Create required directories:
+When a file exists only in the lower layer and a write operation is requested:
 
-```bash
-mkdir lower upper mount
-```
-
-Add sample file:
-
-```bash
-echo "hello world" > lower/file1.txt
-```
-
-Run:
-
-```bash
-./mini_unionfs lower upper mount
-```
+* file is copied from lower layer to upper layer
+* modification is performed in upper layer
 
 ---
 
-## Access Mounted Filesystem
+### Whiteout Deletion
 
-View files:
+When deleting a file that exists only in the lower layer:
 
-```bash
-ls mount
+* original lower file remains unchanged
+* a hidden whiteout file is created in upper layer
+
+Example:
+
+```bash id="dr4eq7"
+.wh.filename
 ```
 
-Read file:
-
-```bash
-cat mount/file1.txt
-```
-
----
-
-## Write Operation Example
-
-Modify file:
-
-```bash
-echo "new data" >> mount/file1.txt
-```
-
-This triggers:
-
-* copy from lower → upper
-* write in upper layer
-
----
-
-## Delete Operation Example
-
-Delete file:
-
-```bash
-rm mount/file1.txt
-```
-
-If file exists only in lower layer:
-
-whiteout file created:
-
-```bash
-upper/.wh.file1.txt
-```
-
----
-
-## Unmount Filesystem
-
-```bash
-fusermount3 -u mount
-```
+This hides the lower-layer file from the mounted filesystem.
 
 ---
 
@@ -179,22 +73,76 @@ fusermount3 -u mount
 
 ### build_path()
 
-Constructs full path from base + relative path.
+Builds complete path using base directory and relative file path.
 
 ### resolve_path()
 
-Resolves whether file exists in:
-
-* upper layer
-* lower layer
+Resolves whether the file exists in upper or lower layer.
 
 ### copy_to_upper()
 
-Copies lower file into upper layer during write.
+Copies lower-layer file into upper layer before write.
 
 ### get_whiteout_path()
 
-Creates whiteout filename.
+Generates whiteout file path for deletion handling.
+
+---
+
+## FUSE Operations Implemented
+
+* `unionfs_getattr`
+* `unionfs_readdir`
+* `unionfs_read`
+* `unionfs_write`
+* `unionfs_unlink`
+
+---
+
+## Compilation
+
+```bash id="njlwm8"
+gcc mini_unionfs.c -o mini_unionfs `pkg-config fuse3 --cflags --libs`
+```
+
+---
+
+## Execution
+
+Create directories:
+
+```bash id="tyrj9n"
+mkdir lower upper mount
+```
+
+Add sample file:
+
+```bash id="5yhygh"
+echo "hello world" > lower/file1.txt
+```
+
+Run filesystem:
+
+```bash id="x39i5q"
+./mini_unionfs lower upper mount
+```
+
+---
+
+## Access Mounted Filesystem
+
+```bash id="e9fzhf"
+ls mount
+cat mount/file1.txt
+```
+
+---
+
+## Unmount Filesystem
+
+```bash id="a1y6x4"
+fusermount3 -u mount
+```
 
 ---
 
@@ -203,22 +151,3 @@ Creates whiteout filename.
 * C Programming
 * FUSE3
 * Linux File System APIs
-
----
-
-## Learning Outcomes
-
-This project demonstrates:
-
-* Filesystem layering
-* Copy-on-write mechanism
-* Whiteout deletion handling
-* FUSE callback operations
-
----
-
-## Author
-
-Implemented as part of Operating Systems / File Systems learning project.
-
-

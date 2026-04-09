@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 
@@ -18,27 +17,14 @@ struct mini_unionfs_state {
 #define STATE ((struct mini_unionfs_state *) fuse_get_context()->private_data)
 
 void build_path(char *dest, const char *base, const char *path) {
-    sprintf(dest, "%s%s", base, path);
-}
-
-void get_whiteout_path(const char *path, char *whiteout) {
-    const char *filename = strrchr(path, '/');
-
-    if (filename)
-        sprintf(whiteout, "%s/.wh.%s", STATE->upper, filename + 1);
-    else
-        sprintf(whiteout, "%s/.wh.%s", STATE->upper, path);
+    snprintf(dest, 1024, "%s%s", base, path);
 }
 
 int resolve_path(const char *path, char *resolved) {
-    char upper_path[1024], lower_path[1024], whiteout[1024];
+    char upper_path[1024], lower_path[1024];
 
     build_path(upper_path, STATE->upper, path);
     build_path(lower_path, STATE->lower, path);
-    get_whiteout_path(path, whiteout);
-
-    if (access(whiteout, F_OK) == 0)
-        return -ENOENT;
 
     if (access(upper_path, F_OK) == 0) {
         strcpy(resolved, upper_path);
@@ -59,7 +45,7 @@ void copy_to_upper(const char *path) {
     build_path(upper_path, STATE->upper, path);
 
     int src = open(lower_path, O_RDONLY);
-    int dst = open(upper_path, O_WRONLY | O_CREAT, 0644);
+    int dst = open(upper_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
     char buf[4096];
     int n;
@@ -80,39 +66,6 @@ static int unionfs_getattr(const char *path, struct stat *stbuf, struct fuse_fil
 
     if (lstat(resolved, stbuf) == -1)
         return -errno;
-
-    return 0;
-}
-
-static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                           off_t offset, struct fuse_file_info *fi,
-                           enum fuse_readdir_flags flags) {
-    DIR *dp;
-    struct dirent *de;
-    char dirpath[1024];
-
-    filler(buf, ".", NULL, 0, 0);
-    filler(buf, "..", NULL, 0, 0);
-
-    build_path(dirpath, STATE->lower, path);
-    dp = opendir(dirpath);
-
-    if (dp) {
-        while ((de = readdir(dp)) != NULL)
-            filler(buf, de->d_name, NULL, 0, 0);
-        closedir(dp);
-    }
-
-    build_path(dirpath, STATE->upper, path);
-    dp = opendir(dirpath);
-
-    if (dp) {
-        while ((de = readdir(dp)) != NULL) {
-            if (strncmp(de->d_name, ".wh.", 4) != 0)
-                filler(buf, de->d_name, NULL, 0, 0);
-        }
-        closedir(dp);
-    }
 
     return 0;
 }
@@ -156,31 +109,10 @@ static int unionfs_write(const char *path, const char *buf, size_t size,
     return res;
 }
 
-static int unionfs_unlink(const char *path) {
-    char upper_path[1024], lower_path[1024], whiteout[1024];
-
-    build_path(upper_path, STATE->upper, path);
-    build_path(lower_path, STATE->lower, path);
-    get_whiteout_path(path, whiteout);
-
-    if (access(upper_path, F_OK) == 0)
-        return unlink(upper_path);
-
-    if (access(lower_path, F_OK) == 0) {
-        int fd = open(whiteout, O_CREAT, 0644);
-        close(fd);
-        return 0;
-    }
-
-    return -ENOENT;
-}
-
 static struct fuse_operations unionfs_oper = {
     .getattr = unionfs_getattr,
-    .readdir = unionfs_readdir,
     .read = unionfs_read,
     .write = unionfs_write,
-    .unlink = unionfs_unlink,
 };
 
 int main(int argc, char *argv[]) {
@@ -198,3 +130,4 @@ int main(int argc, char *argv[]) {
 
     return fuse_main(fuse_argc, fuse_argv, &unionfs_oper, &state);
 }
+

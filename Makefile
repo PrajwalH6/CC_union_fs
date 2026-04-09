@@ -1,12 +1,23 @@
-CC = gcc
-CFLAGS = -Wall `pkg-config fuse3 --cflags`
-LDFLAGS = `pkg-config fuse3 --libs`
+CC      = gcc
+CFLAGS  = -Wall -Wextra -g $(shell pkg-config fuse3 --cflags) -Iinclude
+LDFLAGS = $(shell pkg-config fuse3 --libs)
 
-SRC = src/main.c src/operations.c src/path.c src/cow.c src/utils.c
-OUT = mini_unionfs
+SRCS    = src/main.c src/operations.c src/cow.c src/utils.c
+OBJS    = $(SRCS:.c=.o)
+TARGET  = mini_unionfs
 
-all:
-	$(CC) $(CFLAGS) $(SRC) -o $(OUT) $(LDFLAGS)
+.PHONY: all clean debug
+
+all: $(TARGET)
+
+debug: CFLAGS += -DDEBUG
+debug: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+src/%.o: src/%.c
+	$(CC) $(CFLAGS) -c -o $@ $
 
 clean:
-	rm -f $(OUT)
+	rm -f $(OBJS) $(TARGET)

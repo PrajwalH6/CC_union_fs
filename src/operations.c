@@ -2,14 +2,19 @@
 #include "cow.h"
 
 /* ── getattr ── */
+#ifdef __APPLE__
+int unionfs_getattr(const char *path, struct stat *stbuf)
+{
+#else
 int unionfs_getattr(const char *path, struct stat *stbuf,
                     struct fuse_file_info *fi)
 {
-    char resolved[1024];
     (void) fi;
+#endif
 
     memset(stbuf, 0, sizeof(struct stat));
 
+    char resolved[1024];
     int ret = resolve_path(path, resolved, sizeof(resolved));
     if (ret != 0) return ret;
 
@@ -20,11 +25,18 @@ int unionfs_getattr(const char *path, struct stat *stbuf,
 }
 
 /* ── readdir (YOUR FEATURE) ── */
+#ifdef __APPLE__
+int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                    off_t offset, struct fuse_file_info *fi)
+{
+    (void) offset; (void) fi;
+#else
 int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                     off_t offset, struct fuse_file_info *fi,
                     enum fuse_readdir_flags flags)
 {
     (void) offset; (void) fi; (void) flags;
+#endif
 
     char upper_path[1024], lower_path[1024];
 
@@ -33,8 +45,13 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
         return -ENAMETOOLONG;
 
+#ifdef __APPLE__
+    filler(buf, ".",  NULL, 0);
+    filler(buf, "..", NULL, 0);
+#else
     filler(buf, ".",  NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
+#endif
 
     /* ── Pass 1: scan upper directory ── */
     DIR *upper_dir = opendir(upper_path);
@@ -45,11 +62,14 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 strcmp(de->d_name, "..") == 0)
                 continue;
 
-            /* Never expose .wh.* markers */
             if (is_whiteout(de->d_name))
                 continue;
 
+#ifdef __APPLE__
+            filler(buf, de->d_name, NULL, 0);
+#else
             filler(buf, de->d_name, NULL, 0, 0);
+#endif
         }
         closedir(upper_dir);
     }
@@ -63,18 +83,20 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 strcmp(de->d_name, "..") == 0)
                 continue;
 
-            /* Skip if whiteout exists for this name in upper */
             if (whiteout_exists(upper_path, de->d_name))
                 continue;
 
-            /* Skip if already added from upper (upper takes precedence) */
             char candidate_upper[1024];
             snprintf(candidate_upper, sizeof(candidate_upper),
                      "%s/%s", upper_path, de->d_name);
             if (access(candidate_upper, F_OK) == 0)
                 continue;
 
+#ifdef __APPLE__
+            filler(buf, de->d_name, NULL, 0);
+#else
             filler(buf, de->d_name, NULL, 0, 0);
+#endif
         }
         closedir(lower_dir);
     }

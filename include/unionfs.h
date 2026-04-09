@@ -1,8 +1,15 @@
 #ifndef UNIONFS_H
 #define UNIONFS_H
 
-#define FUSE_USE_VERSION 31
-#include <fuse3/fuse.h>
+/* Auto-detect FUSE version per platform */
+#ifdef __APPLE__
+  #define FUSE_USE_VERSION 26
+  #include <fuse.h>
+#else
+  #define FUSE_USE_VERSION 31
+  #include <fuse3/fuse.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>

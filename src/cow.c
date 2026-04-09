@@ -35,7 +35,11 @@ int copy_to_upper(const char *path)
     fchown(dst, st.st_uid, st.st_gid);
     fchmod(dst, st.st_mode);
 
+#ifdef __APPLE__
+    struct timespec times[2] = { st.st_atimespec, st.st_mtimespec };
+#else
     struct timespec times[2] = { st.st_atim, st.st_mtim };
+#endif
     futimens(dst, times);
 
     LOG("CoW: copied %s -> %s", lower_path, upper_path);

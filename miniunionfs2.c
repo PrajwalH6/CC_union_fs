@@ -23,6 +23,7 @@ void build_path(char *dest, const char *base, const char *path) {
 }
 
 // ================== FEATURE 1: WHITEOUT ===================== //
+
 // Implements unlink with whiteout logic (CORE REQUIREMENT)
 
 static int unionfs_unlink(const char *path) {

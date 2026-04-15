@@ -1,6 +1,8 @@
 #include "operations.h"
 #include "cow.h"
+#include "cache.h"
 #include <sys/xattr.h>
+
 
 /* ── getattr ── */
 #ifdef __APPLE__
@@ -63,8 +65,7 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 strcmp(de->d_name, "..") == 0)
                 continue;
 
-            if (is_whiteout(de->d_name))
-                continue;
+            
 
 #ifdef __APPLE__
             filler(buf, de->d_name, NULL, 0);
@@ -165,16 +166,46 @@ int unionfs_read(const char *path, char *buf, size_t size,
 }
 
 /* ── write ── */
+/* ── write ── */
 int unionfs_write(const char *path, const char *buf, size_t size,
                   off_t offset, struct fuse_file_info *fi)
 {
-    (void) path;
+    int fd;
+    char upper_path[1024];
+    char resolved[1024];
 
-    int fd = (int) fi->fh;
-    if (fd == -1) return -EBADF;
+    /* Build upper path */
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
 
+    /* 🔥 CoW: ensure file exists in upper */
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+
+    /* Open upper file for writing */
+    fd = open(upper_path, O_WRONLY);
+    if (fd == -1)
+        return -errno;
+
+    /* Perform write */
     int res = pwrite(fd, buf, size, offset);
-    if (res == -1) return -errno;
+    if (res == -1) {
+        close(fd);
+        return -errno;
+    }
+
+    close(fd);
+
+    /* 🔥 Invalidate cache after modification */
+    cache_invalidate(path);
+
     return res;
 }
 
@@ -188,111 +219,42 @@ static int unionfs_release(const char *path, struct fuse_file_info *fi)
 
 int unionfs_unlink(const char *path)
 {
-    char upper_path[1024], lower_path[1024];
+    char upper_path[1024];
     char whiteout_path[1024];
 
-    if (path == NULL || strlen(path) == 0)
+    if (!path || !STATE)
         return -EINVAL;
 
-    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
-        return -ENAMETOOLONG;
-    if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
+    /* Build upper path */
+    if (build_path(upper_path, sizeof(upper_path),
+                   STATE->upper, path) < 0)
         return -ENAMETOOLONG;
 
+    /* Extract filename */
     const char *filename = strrchr(path, '/');
     filename = filename ? filename + 1 : path;
 
-    char *dir_path = strdup(path);
-    if (!dir_path) return -ENOMEM;
-
-    char *last_slash = strrchr(dir_path, '/');
-    if (last_slash && last_slash != dir_path) {
-        *last_slash = '\0';
-    } else {
-        strcpy(dir_path, "");
-    }
-
-    if (strlen(dir_path) > 0) {
+    /* Whiteout path in upper root */
     snprintf(whiteout_path, sizeof(whiteout_path),
-             "%s%s/.wh.%s",
-             STATE->upper, dir_path, filename);
-    } else {
-        snprintf(whiteout_path, sizeof(whiteout_path),
-                "%s/.wh.%s",
-                STATE->upper, filename);
-    }
+             "%s/.wh.%s", STATE->upper, filename);
 
-    int upper_exists = (access(upper_path, F_OK) == 0);
-    int lower_exists = (access(lower_path, F_OK) == 0);
-
-    if (upper_exists) {
-        if (is_whiteout(filename)) {
-            if (unlink(upper_path) == -1) {
-                free(dir_path);
-                return -errno;
-            }
-            LOG("unlink: removed whiteout %s", upper_path);
-            free(dir_path);
-            return 0;
-        }
-
-        if (unlink(upper_path) == -1) {
-            free(dir_path);
+    /* Delete from upper if exists */
+    if (access(upper_path, F_OK) == 0) {
+        if (unlink(upper_path) == -1)
             return -errno;
-        }
-        LOG("unlink: deleted upper file %s", upper_path);
-
-        if (lower_exists) {
-            char upper_dir[1024];
-            snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
-
-            struct stat st;
-            if (stat(upper_dir, &st) == -1) {
-                if (mkdir(upper_dir, 0755) == -1 && errno != EEXIST) {
-                    free(dir_path);
-                    return -errno;
-                }
-            }
-
-            int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd == -1) {
-                free(dir_path);
-                return -errno;
-            }
-            close(fd);
-            LOG("unlink: created whiteout %s", whiteout_path);
-        }
-
-        free(dir_path);
-        return 0;
     }
 
-    if (lower_exists) {
-        char upper_dir[1024];
-        snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
-
-        struct stat st;
-        if (stat(upper_dir, &st) == -1) {
-            if (mkdir(upper_dir, 0755) == -1 && errno != EEXIST) {
-                free(dir_path);
-                return -errno;
-            }
-        }
-
-        int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1) {
-            free(dir_path);
-            return -errno;
-        }
-        close(fd);
-
-        LOG("unlink: created whiteout for lower file %s", whiteout_path);
-        free(dir_path);
-        return 0;
+    /* 🔥 Create whiteout (no silent failure) */
+    int fd = open(whiteout_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd == -1) {
+        perror("WHITEOUT ERROR");   // important debug
+        return -errno;
     }
+    close(fd);
 
-    free(dir_path);
-    return -ENOENT;
+    cache_invalidate(path);
+
+    return 0;
 }
 
 int unionfs_mkdir(const char *path, mode_t mode)
@@ -319,176 +281,70 @@ int unionfs_rmdir(const char *path)
 {
     char upper_path[1024], lower_path[1024];
     char whiteout_path[1024];
-    DIR *dp;
-    struct dirent *de;
-    int entry_count = 0;
-    
-    /* Input validation */
-    if (path == NULL || strlen(path) == 0)
+
+    if (!path || strlen(path) == 0)
         return -EINVAL;
-    
+
     if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
         return -ENAMETOOLONG;
     if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
         return -ENAMETOOLONG;
-    
-    /* 
-     * CRITICAL: Check if directory is empty in MERGED view
-     * Must count entries from both upper and lower, respecting whiteout
-     */
-    
-    /* Count entries in upper directory */
-    dp = opendir(upper_path);
-    if (dp != NULL) {
-        while ((de = readdir(dp)) != NULL) {
-            /* Skip . and .. */
-            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-                continue;
-            
-            /* Skip whiteout markers */
-            if (is_whiteout(de->d_name))
-                continue;
-            
-            /* Found a real entry */
-            entry_count++;
-            LOG("rmdir: found entry in upper: %s", de->d_name);
-        }
-        closedir(dp);
-    }
-    
-    /* Count entries in lower directory (not whiteout) */
-    dp = opendir(lower_path);
-    if (dp != NULL) {
-        while ((de = readdir(dp)) != NULL) {
-            /* Skip . and .. */
-            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-                continue;
-            
-            /* Check if this entry is whiteout in upper */
-            if (whiteout_exists(upper_path, de->d_name)) {
-                LOG("rmdir: %s is whiteout, skipping", de->d_name);
-                continue;
+
+    DIR *dir;
+    struct dirent *de;
+
+    /* Check upper */
+    dir = opendir(upper_path);
+    if (dir) {
+        while ((de = readdir(dir)) != NULL) {
+            if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
+                closedir(dir);
+                return -ENOTEMPTY;
             }
-            
-            /* Check if this entry exists in upper (would be duplicate) */
-            char candidate_upper[1024];
-            snprintf(candidate_upper, sizeof(candidate_upper),
-                     "%s/%s", upper_path, de->d_name);
-            if (access(candidate_upper, F_OK) == 0) {
-                LOG("rmdir: %s exists in upper, skipping", de->d_name);
-                continue;
-            }
-            
-            /* Found a real entry from lower */
-            entry_count++;
-            LOG("rmdir: found entry in lower: %s", de->d_name);
         }
-        closedir(dp);
+        closedir(dir);
     }
-    
-    /* If directory is not empty, fail */
-    if (entry_count > 0) {
-        LOG("rmdir: directory not empty (%d entries)", entry_count);
-        return -ENOTEMPTY;
+
+    /* Check lower */
+    dir = opendir(lower_path);
+    if (dir) {
+        while ((de = readdir(dir)) != NULL) {
+            if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
+                if (whiteout_exists(upper_path, de->d_name))
+                    continue;
+                closedir(dir);
+                return -ENOTEMPTY;
+            }
+        }
+        closedir(dir);
     }
-    
-    /* Directory is empty, proceed with removal */
-    
+
     int upper_exists = (access(upper_path, F_OK) == 0);
     int lower_exists = (access(lower_path, F_OK) == 0);
-    
-    /* Extract directory name for whiteout */
-    const char *dirname = strrchr(path, '/');
-    dirname = dirname ? dirname + 1 : path;
-    
-    /* Build whiteout path */
-    char *parent_path = strdup(path);
-    if (!parent_path) return -ENOMEM;
-    
-    char *last_slash = strrchr(parent_path, '/');
-    if (last_slash && last_slash != parent_path) {
-        *last_slash = '\0';
-    } else {
-        strcpy(parent_path, "");
-    }
-    
-    snprintf(whiteout_path, sizeof(whiteout_path),
-             "%s%s/.wh.%s", STATE->upper, 
-             strlen(parent_path) > 0 ? parent_path : "", dirname);
-    
-    /* Case 1: Directory exists in upper */
+
+    const char *filename = strrchr(path, '/');
+    filename = filename ? filename + 1 : path;
+
+    char wh_name[1024];
+    snprintf(wh_name, sizeof(wh_name), "/.wh.%s", filename);
+
+    if (build_path(whiteout_path, sizeof(whiteout_path),
+                   STATE->upper, wh_name) < 0)
+        return -ENAMETOOLONG;
+
     if (upper_exists) {
-        /* Remove the directory */
-        if (rmdir(upper_path) == -1) {
-            free(parent_path);
+        if (rmdir(upper_path) == -1)
             return -errno;
-        }
-        LOG("rmdir: removed upper directory %s", upper_path);
-        
-        /* If there's also a directory in lower, create whiteout */
-        if (lower_exists) {
-            /* Ensure parent directory exists in upper */
-            char upper_parent[1024];
-            snprintf(upper_parent, sizeof(upper_parent),
-                     "%s%s", STATE->upper, parent_path);
-            
-            struct stat st;
-            if (stat(upper_parent, &st) == -1) {
-                if (mkdir(upper_parent, 0755) == -1 && errno != EEXIST) {
-                    LOG("rmdir: failed to create parent directory");
-                    free(parent_path);
-                    return -errno;
-                }
-            }
-            
-            /* Create whiteout marker */
-            int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd == -1) {
-                LOG("rmdir: failed to create whiteout %s", whiteout_path);
-                free(parent_path);
-                return -errno;
-            }
-            close(fd);
-            LOG("rmdir: created whiteout %s", whiteout_path);
-        }
-        
-        free(parent_path);
-        return 0;
     }
-    
-    /* Case 2: Directory exists only in lower */
+
     if (lower_exists) {
-        /* Ensure parent directory exists in upper */
-        char upper_parent[1024];
-        snprintf(upper_parent, sizeof(upper_parent),
-                 "%s%s", STATE->upper, parent_path);
-        
-        struct stat st;
-        if (stat(upper_parent, &st) == -1) {
-            if (mkdir(upper_parent, 0755) == -1 && errno != EEXIST) {
-                LOG("rmdir: failed to create parent directory");
-                free(parent_path);
-                return -errno;
-            }
-        }
-        
-        /* Create whiteout marker */
-        int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1) {
-            LOG("rmdir: failed to create whiteout %s", whiteout_path);
-            free(parent_path);
+        int fd = open(whiteout_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd == -1)
             return -errno;
-        }
         close(fd);
-        
-        LOG("rmdir: created whiteout for lower directory %s", whiteout_path);
-        free(parent_path);
-        return 0;
     }
-    
-    /* Case 3: Directory doesn't exist anywhere */
-    free(parent_path);
-    return -ENOENT;
+
+    return 0;
 }
 
 /* ── setxattr (SET EXTENDED ATTRIBUTES) ── */
@@ -793,6 +649,78 @@ int unionfs_rename(const char *oldpath, const char *newpath, unsigned int flags)
     return 0;
 }
 
+/* ── chmod (CHANGE PERMISSIONS) ── */
+int unionfs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+    (void) fi;
+    
+    char upper_path[1024];
+    char resolved[1024];
+    
+    if (path == NULL)
+        return -EINVAL;
+    
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+    
+    /* If file exists only in lower → trigger CoW */
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));  // ✅ FIX
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+    
+    if (chmod(upper_path, mode) == -1)
+        return -errno;
+    
+    cache_invalidate(path);  // ✅ VERY IMPORTANT
+    
+    LOG("chmod: %s mode=%o", path, mode);
+    return 0;
+}
+
+
+/* ── chown (CHANGE OWNERSHIP) ── */
+int unionfs_chown(const char *path, uid_t uid, gid_t gid,
+                  struct fuse_file_info *fi)
+{
+    (void) fi;
+    
+    char upper_path[1024];
+    char resolved[1024];
+    
+    if (path == NULL)
+        return -EINVAL;
+    
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+    
+    /* If file exists only in lower → trigger CoW */
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));  // ✅ FIX
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+    
+    if (chown(upper_path, uid, gid) == -1)
+        return -errno;
+    
+    cache_invalidate(path);  // ✅ VERY IMPORTANT
+    
+    LOG("chown: %s uid=%d gid=%d", path, uid, gid);
+    return 0;
+}
+
+/* ── FUSE operations table ── */
+
 /* ── FUSE operations table ── */
 struct fuse_operations unionfs_oper = {
     .getattr    = unionfs_getattr,
@@ -805,7 +733,6 @@ struct fuse_operations unionfs_oper = {
     .unlink     = unionfs_unlink,
     .mkdir      = unionfs_mkdir,
     .rmdir      = unionfs_rmdir,
-    .readlink   = unionfs_readlink,
-    .symlink    = unionfs_symlink,
-    .rename     = unionfs_rename,
+    .chmod      = unionfs_chmod,
+    .chown      = unionfs_chown,
 };

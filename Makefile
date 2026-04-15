@@ -1,5 +1,5 @@
 CC     = gcc
-SRCS   = src/main.c src/operations.c src/cow.c src/utils.c
+SRCS = src/main.c src/operations.c src/cow.c src/utils.c src/cache.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = mini_unionfs
 

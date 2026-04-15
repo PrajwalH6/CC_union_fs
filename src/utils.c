@@ -28,30 +28,50 @@ int resolve_path(const char *path, char *resolved, size_t size)
     char whiteout_path[1024];
 
     /* Build paths */
-    build_path(upper_path, sizeof(upper_path), STATE->upper, path);
-    build_path(lower_path, sizeof(lower_path), STATE->lower, path);
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+    if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
+        return -ENAMETOOLONG;
 
     /* Extract filename */
     const char *filename = strrchr(path, '/');
     filename = filename ? filename + 1 : path;
 
-    /* 🔥 Check whiteout FIRST */
-    snprintf(whiteout_path, sizeof(whiteout_path),
-             "%s/.wh.%s", STATE->upper, filename);
+    /* Extract directory path */
+    char dir_path[1024];
+    strncpy(dir_path, path, sizeof(dir_path));
+    dir_path[sizeof(dir_path) - 1] = '\0';
 
-    if (access(whiteout_path, F_OK) == 0) {
-        return -ENOENT;   // 🔥 hide file
+    char *last_slash = strrchr(dir_path, '/');
+    if (last_slash && last_slash != dir_path) {
+        *last_slash = '\0';
+    } else {
+        strcpy(dir_path, "");
     }
 
-    /* Check upper */
+    /* Build correct whiteout path */
+    snprintf(whiteout_path, sizeof(whiteout_path),
+             "%s%s/.wh.%s",
+             STATE->upper,
+             strlen(dir_path) > 0 ? dir_path : "",
+             filename);
+
+    /* Check whiteout FIRST */
+    if (access(whiteout_path, F_OK) == 0) {
+        return -ENOENT;   // file is logically deleted
+    }
+
+    /* Check upper layer */
     if (access(upper_path, F_OK) == 0) {
-        strncpy(resolved, upper_path, size);
+        strncpy(resolved, upper_path, size - 1);
+        resolved[size - 1] = '\0';
         return 0;
     }
 
-    /* Check lower */
+    /* Check lower layer */
     if (access(lower_path, F_OK) == 0) {
-        strncpy(resolved, lower_path, size);
+        strncpy(resolved, lower_path, size - 1);
+        resolved[size - 1] = '\0';
         return 0;
     }
 

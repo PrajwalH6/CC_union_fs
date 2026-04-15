@@ -102,7 +102,7 @@ Generates whiteout file path for deletion handling.
 ## Compilation
 
 ```bash id="njlwm8"
-gcc mini_unionfs.c -o mini_unionfs `pkg-config fuse3 --cflags --libs`
+make
 ```
 
 ---

@@ -145,7 +145,7 @@ int resolve_path_cached(const char *path, char *resolved, size_t size)
         return ret;  /* Cache hit or cached whiteout */
     
     /* Cache miss - resolve normally */
-    ret = resolve_path_cached(path, resolved, size);
+    ret = resolve_path(path, resolved, size);
     
     /* Insert into cache */
     if (ret == 0) {

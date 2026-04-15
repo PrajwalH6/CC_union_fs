@@ -30,4 +30,9 @@ int unionfs_listxattr   (const char *, char *, size_t);
 int unionfs_removexattr (const char *, const char *);
 int unionfs_truncate    (const char *, off_t, struct fuse_file_info *);
 
+
+int unionfs_readlink (const char *, char *, size_t);
+int unionfs_symlink  (const char *, const char *);
+int unionfs_rename   (const char *, const char *, unsigned int);
+
 #endif /* OPERATIONS_H */

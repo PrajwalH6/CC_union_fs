@@ -27,7 +27,7 @@ int unionfs_getattr(const char *path, struct stat *stbuf,
     return 0;
 }
 
-/* ── readdir (YOUR FEATURE) ── */
+/* ── readdir  ── */
 #ifdef __APPLE__
 int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                     off_t offset, struct fuse_file_info *fi)
@@ -107,7 +107,7 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return 0;
 }
 
-/* ── create (YOUR FEATURE) ── */
+/* ── create ── */
 int unionfs_create(const char *path, mode_t mode,
                    struct fuse_file_info *fi)
 {
@@ -178,7 +178,7 @@ int unionfs_write(const char *path, const char *buf, size_t size,
     if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
         return -ENAMETOOLONG;
 
-    /* 🔥 CoW: ensure file exists in upper */
+    /*  CoW: ensure file exists in upper */
     if (access(upper_path, F_OK) != 0) {
         int ret = resolve_path(path, resolved, sizeof(resolved));
         if (ret == 0) {
@@ -203,7 +203,7 @@ int unionfs_write(const char *path, const char *buf, size_t size,
 
     close(fd);
 
-    /* 🔥 Invalidate cache after modification */
+    /*  Invalidate cache after modification */
     cache_invalidate(path);
 
     return res;
@@ -234,9 +234,34 @@ int unionfs_unlink(const char *path)
     const char *filename = strrchr(path, '/');
     filename = filename ? filename + 1 : path;
 
-    /* Whiteout path in upper root */
+    /* Extract directory path */
+    char dir_path[1024];
+    strncpy(dir_path, path, sizeof(dir_path));
+    dir_path[sizeof(dir_path)-1] = '\0';
+
+    char *last_slash = strrchr(dir_path, '/');
+    if (last_slash && last_slash != dir_path) {
+        *last_slash = '\0';
+    } else {
+        strcpy(dir_path, "");
+    }
+
+    /* Build full upper directory path */
+    char upper_dir[1024];
+    snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
+
+    /* Ensure directory exists */
+    struct stat st;
+    if (stat(upper_dir, &st) == -1) {
+        mkdir(upper_dir, 0755);  // simple mkdir (enough for project)
+    }
+
+    /* Build correct whiteout path */
     snprintf(whiteout_path, sizeof(whiteout_path),
-             "%s/.wh.%s", STATE->upper, filename);
+            "%s%s/.wh.%s",
+            STATE->upper,
+            strlen(dir_path) > 0 ? dir_path : "",
+            filename);
 
     /* Delete from upper if exists */
     if (access(upper_path, F_OK) == 0) {
@@ -244,7 +269,7 @@ int unionfs_unlink(const char *path)
             return -errno;
     }
 
-    /* 🔥 Create whiteout (no silent failure) */
+    /*  Create whiteout*/
     int fd = open(whiteout_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd == -1) {
         perror("WHITEOUT ERROR");   // important debug
@@ -496,8 +521,6 @@ int unionfs_truncate(const char *path, off_t size,
 }
 
 
-// Add this section before the FUSE operations table (around line 230):
-
 /* ── readlink (READ SYMBOLIC LINK TARGET) ── */
 int unionfs_readlink(const char *path, char *buf, size_t size)
 {
@@ -632,9 +655,22 @@ int unionfs_rename(const char *oldpath, const char *newpath, unsigned int flags)
         }
         
         char whiteout[1024];
+
+        /* Ensure directory exists */
+        char upper_dir[1024];
+        snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
+
+        struct stat st;
+        if (stat(upper_dir, &st) == -1) {
+            mkdir(upper_dir, 0755);
+        }
+
+        /* Build whiteout path */
         snprintf(whiteout, sizeof(whiteout),
-                 "%s%s/.wh.%s", STATE->upper, 
-                 strlen(dir_path) > 0 ? dir_path : "", filename);
+                "%s%s/.wh.%s",
+                STATE->upper,
+                strlen(dir_path) > 0 ? dir_path : "",
+                filename);
         
         int fd = open(whiteout, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd != -1) {
@@ -665,7 +701,7 @@ int unionfs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     
     /* If file exists only in lower → trigger CoW */
     if (access(upper_path, F_OK) != 0) {
-        int ret = resolve_path(path, resolved, sizeof(resolved));  // ✅ FIX
+        int ret = resolve_path(path, resolved, sizeof(resolved));  
         if (ret == 0) {
             ret = copy_to_upper(path);
             if (ret != 0) return ret;
@@ -677,7 +713,7 @@ int unionfs_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (chmod(upper_path, mode) == -1)
         return -errno;
     
-    cache_invalidate(path);  // ✅ VERY IMPORTANT
+    cache_invalidate(path);  
     
     LOG("chmod: %s mode=%o", path, mode);
     return 0;
@@ -713,15 +749,12 @@ int unionfs_chown(const char *path, uid_t uid, gid_t gid,
     if (chown(upper_path, uid, gid) == -1)
         return -errno;
     
-    cache_invalidate(path);  // ✅ VERY IMPORTANT
+    cache_invalidate(path);  
     
     LOG("chown: %s uid=%d gid=%d", path, uid, gid);
     return 0;
 }
 
-/* ── FUSE operations table ── */
-
-/* ── FUSE operations table ── */
 struct fuse_operations unionfs_oper = {
     .getattr    = unionfs_getattr,
     .readdir    = unionfs_readdir,
@@ -733,6 +766,14 @@ struct fuse_operations unionfs_oper = {
     .unlink     = unionfs_unlink,
     .mkdir      = unionfs_mkdir,
     .rmdir      = unionfs_rmdir,
+    .setxattr   = unionfs_setxattr,
+    .getxattr   = unionfs_getxattr,
+    .listxattr  = unionfs_listxattr,
+    .removexattr= unionfs_removexattr,
+    .truncate   = unionfs_truncate,
+    .rename     = unionfs_rename,
+    .symlink    = unionfs_symlink,
+    .readlink   = unionfs_readlink,
     .chmod      = unionfs_chmod,
     .chown      = unionfs_chown,
 };

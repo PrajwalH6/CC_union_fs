@@ -58,100 +58,74 @@ echo "=== BASIC OPERATIONS ==="
 
 test_start "Read from lower layer"
 echo "lower" > "$LOWER/test.txt"
-if grep -q "lower" "$MNT/test.txt" 2>/dev/null; then
-    test_pass
-else
-    test_fail "Could not read from lower"
-fi
+grep -q "lower" "$MNT/test.txt" && test_pass || test_fail
 
 test_start "Write triggers CoW"
-echo "modified" >> "$MNT/test.txt" 2>/dev/null
-if [ -f "$UPPER/test.txt" ] && grep -q "modified" "$UPPER/test.txt"; then
-    test_pass
-else
-    test_fail "CoW did not work"
-fi
+echo "modified" >> "$MNT/test.txt"
+[ -f "$UPPER/test.txt" ] && grep -q "modified" "$UPPER/test.txt" && test_pass || test_fail
 
 test_start "File creation"
-echo "new" > "$MNT/new.txt" 2>/dev/null
-if [ -f "$UPPER/new.txt" ]; then
-    test_pass
-else
-    test_fail "File not created in upper"
-fi
+echo "new" > "$MNT/new.txt"
+[ -f "$UPPER/new.txt" ] && test_pass || test_fail
 
 echo ""
 echo "=== DIRECTORY OPERATIONS ==="
 
 test_start "mkdir"
-mkdir "$MNT/newdir" 2>/dev/null
-if [ -d "$UPPER/newdir" ]; then
-    test_pass
-else
-    test_fail "Directory not created"
-fi
+mkdir "$MNT/newdir"
+[ -d "$UPPER/newdir" ] && test_pass || test_fail
 
-test_start "rmdir empty directory"
-rmdir "$MNT/newdir" 2>/dev/null
-if [ ! -d "$MNT/newdir" ]; then
-    test_pass
-else
-    test_fail "Directory not removed"
-fi
+test_start "rmdir empty"
+rmdir "$MNT/newdir"
+[ ! -d "$MNT/newdir" ] && test_pass || test_fail
 
 test_start "rmdir non-empty fails"
-mkdir "$MNT/nonempty" 2>/dev/null
-touch "$MNT/nonempty/file" 2>/dev/null
+mkdir "$MNT/nonempty"
+touch "$MNT/nonempty/file"
 rmdir "$MNT/nonempty" 2>/dev/null
-if [ -d "$MNT/nonempty" ]; then
-    test_pass
-else
-    test_fail "Non-empty directory was removed"
-fi
+[ -d "$MNT/nonempty" ] && test_pass || test_fail
 
 echo ""
-echo "=== DELETION & WHITEOUT ==="
+echo "=== WHITEOUT ==="
 
 test_start "Delete lower file creates whiteout"
 echo "delete_me" > "$LOWER/delete.txt"
-rm "$MNT/delete.txt" 2>/dev/null
-if [ ! -f "$MNT/delete.txt" ] 2>/dev/null && [ -f "$UPPER/.wh.delete.txt" ]; then
-    test_pass
-else
-    test_fail "Whiteout not created"
-fi
+rm "$MNT/delete.txt"
+[ ! -f "$MNT/delete.txt" ] && [ -f "$UPPER/.wh.delete.txt" ] && test_pass || test_fail
 
 echo ""
-echo "=== PERMISSIONS ==="
+echo "=== ADVANCED FEATURES ==="
+
+test_start "truncate"
+echo "123456789" > "$MNT/trunc.txt"
+truncate -s 4 "$MNT/trunc.txt"
+grep -q "1234" "$MNT/trunc.txt" && test_pass || test_fail
+
+test_start "rename"
+mv "$MNT/test.txt" "$MNT/renamed.txt"
+[ -f "$MNT/renamed.txt" ] && test_pass || test_fail
+
+test_start "symlink"
+ln -s renamed.txt "$MNT/link.txt"
+[ -L "$MNT/link.txt" ] && test_pass || test_fail
+
+test_start "readlink"
+readlink "$MNT/link.txt" | grep -q "renamed.txt" && test_pass || test_fail
 
 test_start "chmod"
-chmod 600 "$MNT/test.txt" 2>/dev/null
-if [ -f "$UPPER/test.txt" ]; then
-    perms=$(stat -c "%a" "$UPPER/test.txt" 2>/dev/null || stat -f "%A" "$UPPER/test.txt" 2>/dev/null)
-    if [ "$perms" = "600" ] || [ "$perms" = "rw-------" ]; then
-        test_pass
-    else
-        test_fail "Expected 600, got $perms"
-    fi
-else
-    test_fail "File not in upper layer"
-fi
+chmod 600 "$MNT/renamed.txt"
+perms=$(stat -c "%a" "$UPPER/renamed.txt")
+[ "$perms" = "600" ] && test_pass || test_fail
 
-test_start "chown (if running as root)"
-if [ "$(id -u)" = "0" ]; then
-    chown 1000:1000 "$MNT/test.txt" 2>/dev/null
-    test_pass
-else
-    echo "  (skipped - not running as root)"
-fi
+test_start "xattr"
+setfattr -n user.test -v "hello" "$MNT/renamed.txt" 2>/dev/null
+getfattr -n user.test "$MNT/renamed.txt" 2>/dev/null | grep -q "hello" && test_pass || test_fail
 
 echo ""
-echo "=== PERFORMANCE & CACHE ==="
+echo "=== CACHE ==="
 
-test_start "Multiple reads (cache test)"
-for i in {1..50}; do
-    cat "$MNT/test.txt" > /dev/null 2>&1
-done
+test_start "cache hits"
+for i in {1..50}; do cat "$MNT/renamed.txt" > /dev/null; done
 test_pass
 
 echo ""

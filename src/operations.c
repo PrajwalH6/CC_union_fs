@@ -1,6 +1,5 @@
 #include "operations.h"
 #include "cow.h"
-#include <sys/xattr.h>
 
 /* ── getattr ── */
 #ifdef __APPLE__
@@ -186,7 +185,6 @@ static int unionfs_release(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
-/* ── unlink (WITH WHITEOUT SUPPORT) ── */
 int unionfs_unlink(const char *path)
 {
     char upper_path[1024], lower_path[1024];
@@ -464,4 +462,4 @@ struct fuse_operations unionfs_oper = {
     .listxattr      = unionfs_listxattr,
     .removexattr    = unionfs_removexattr,
     .truncate       = unionfs_truncate,
-};
+  };

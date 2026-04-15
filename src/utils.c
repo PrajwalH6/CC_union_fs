@@ -23,20 +23,37 @@ int whiteout_exists(const char *dir_upper, const char *name)
 
 int resolve_path(const char *path, char *resolved, size_t size)
 {
-    char upper_path[1024], lower_path[1024];
+    char upper_path[1024];
+    char lower_path[1024];
+    char whiteout_path[1024];
 
-    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
-        return -ENAMETOOLONG;
-    if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
-        return -ENAMETOOLONG;
+    /* Build paths */
+    build_path(upper_path, sizeof(upper_path), STATE->upper, path);
+    build_path(lower_path, sizeof(lower_path), STATE->lower, path);
 
+    /* Extract filename */
+    const char *filename = strrchr(path, '/');
+    filename = filename ? filename + 1 : path;
+
+    /* 🔥 Check whiteout FIRST */
+    snprintf(whiteout_path, sizeof(whiteout_path),
+             "%s/.wh.%s", STATE->upper, filename);
+
+    if (access(whiteout_path, F_OK) == 0) {
+        return -ENOENT;   // 🔥 hide file
+    }
+
+    /* Check upper */
     if (access(upper_path, F_OK) == 0) {
-        snprintf(resolved, size, "%s", upper_path);
+        strncpy(resolved, upper_path, size);
         return 0;
     }
+
+    /* Check lower */
     if (access(lower_path, F_OK) == 0) {
-        snprintf(resolved, size, "%s", lower_path);
+        strncpy(resolved, lower_path, size);
         return 0;
     }
+
     return -ENOENT;
 }

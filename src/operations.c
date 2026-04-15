@@ -185,21 +185,281 @@ static int unionfs_release(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
-/* ── Stubs for teammate features (filled in by TM2 and TM3) ── */
-int unionfs_unlink(const char *path) { (void) path; return -ENOSYS; }
+int unionfs_unlink(const char *path)
+{
+    char upper_path[1024], lower_path[1024];
+    char whiteout_path[1024];
+
+    if (path == NULL || strlen(path) == 0)
+        return -EINVAL;
+
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+    if (build_path(lower_path, sizeof(lower_path), STATE->lower, path) < 0)
+        return -ENAMETOOLONG;
+
+    const char *filename = strrchr(path, '/');
+    filename = filename ? filename + 1 : path;
+
+    char *dir_path = strdup(path);
+    if (!dir_path) return -ENOMEM;
+
+    char *last_slash = strrchr(dir_path, '/');
+    if (last_slash && last_slash != dir_path) {
+        *last_slash = '\0';
+    } else {
+        strcpy(dir_path, "");
+    }
+
+    if (strlen(dir_path) > 0) {
+    snprintf(whiteout_path, sizeof(whiteout_path),
+             "%s%s/.wh.%s",
+             STATE->upper, dir_path, filename);
+    } else {
+        snprintf(whiteout_path, sizeof(whiteout_path),
+                "%s/.wh.%s",
+                STATE->upper, filename);
+    }
+
+    int upper_exists = (access(upper_path, F_OK) == 0);
+    int lower_exists = (access(lower_path, F_OK) == 0);
+
+    if (upper_exists) {
+        if (is_whiteout(filename)) {
+            if (unlink(upper_path) == -1) {
+                free(dir_path);
+                return -errno;
+            }
+            LOG("unlink: removed whiteout %s", upper_path);
+            free(dir_path);
+            return 0;
+        }
+
+        if (unlink(upper_path) == -1) {
+            free(dir_path);
+            return -errno;
+        }
+        LOG("unlink: deleted upper file %s", upper_path);
+
+        if (lower_exists) {
+            char upper_dir[1024];
+            snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
+
+            struct stat st;
+            if (stat(upper_dir, &st) == -1) {
+                if (mkdir(upper_dir, 0755) == -1 && errno != EEXIST) {
+                    free(dir_path);
+                    return -errno;
+                }
+            }
+
+            int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1) {
+                free(dir_path);
+                return -errno;
+            }
+            close(fd);
+            LOG("unlink: created whiteout %s", whiteout_path);
+        }
+
+        free(dir_path);
+        return 0;
+    }
+
+    if (lower_exists) {
+        char upper_dir[1024];
+        snprintf(upper_dir, sizeof(upper_dir), "%s%s", STATE->upper, dir_path);
+
+        struct stat st;
+        if (stat(upper_dir, &st) == -1) {
+            if (mkdir(upper_dir, 0755) == -1 && errno != EEXIST) {
+                free(dir_path);
+                return -errno;
+            }
+        }
+
+        int fd = open(whiteout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd == -1) {
+            free(dir_path);
+            return -errno;
+        }
+        close(fd);
+
+        LOG("unlink: created whiteout for lower file %s", whiteout_path);
+        free(dir_path);
+        return 0;
+    }
+
+    free(dir_path);
+    return -ENOENT;
+}
+
 int unionfs_mkdir (const char *path, mode_t mode) { (void)path; (void)mode; return -ENOSYS; }
 int unionfs_rmdir (const char *path) { (void) path; return -ENOSYS; }
 
+/* ── setxattr (SET EXTENDED ATTRIBUTES) ── */
+int unionfs_setxattr(const char *path, const char *name,
+                     const char *value, size_t size, int flags)
+{
+    char upper_path[1024];
+    char resolved[1024];
+
+    if (path == NULL || name == NULL || value == NULL)
+        return -EINVAL;
+
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+
+#ifdef __APPLE__
+    if (setxattr(upper_path, name, value, size, 0, flags) == -1)
+#else
+    if (setxattr(upper_path, name, value, size, flags) == -1)
+#endif
+        return -errno;
+
+    LOG("setxattr: %s -> %s", path, name);
+    return 0;
+}
+
+/* ── getxattr (GET EXTENDED ATTRIBUTES) ── */
+int unionfs_getxattr(const char *path, const char *name,
+                     char *value, size_t size)
+{
+    char resolved[1024];
+
+    if (path == NULL || name == NULL)
+        return -EINVAL;
+
+    int ret = resolve_path(path, resolved, sizeof(resolved));
+    if (ret != 0) return ret;
+
+#ifdef __APPLE__
+    ssize_t res = getxattr(resolved, name, value, size, 0, 0);
+#else
+    ssize_t res = getxattr(resolved, name, value, size);
+#endif
+
+    if (res == -1)
+        return -errno;
+
+    LOG("getxattr: %s -> %s", path, name);
+    return (int)res;
+}
+
+/* ── listxattr (LIST EXTENDED ATTRIBUTES) ── */
+int unionfs_listxattr(const char *path, char *list, size_t size)
+{
+    char resolved[1024];
+
+    if (path == NULL)
+        return -EINVAL;
+
+    int ret = resolve_path(path, resolved, sizeof(resolved));
+    if (ret != 0) return ret;
+
+#ifdef __APPLE__
+    ssize_t res = listxattr(resolved, list, size, 0);
+#else
+    ssize_t res = listxattr(resolved, list, size);
+#endif
+
+    if (res == -1)
+        return -errno;
+
+    LOG("listxattr: %s", path);
+    return (int)res;
+}
+
+/* ── removexattr (REMOVE EXTENDED ATTRIBUTES) ── */
+int unionfs_removexattr(const char *path, const char *name)
+{
+    char upper_path[1024];
+    char resolved[1024];
+
+    if (path == NULL || name == NULL)
+        return -EINVAL;
+
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+
+#ifdef __APPLE__
+    if (removexattr(upper_path, name, 0) == -1)
+#else
+    if (removexattr(upper_path, name) == -1)
+#endif
+        return -errno;
+
+    LOG("removexattr: %s -> %s", path, name);
+    return 0;
+}
+
+/* ── truncate (TRUNCATE FILE SIZE) ── */
+int unionfs_truncate(const char *path, off_t size,
+                     struct fuse_file_info *fi)
+{
+    (void) fi;
+
+    char upper_path[1024];
+    char resolved[1024];
+
+    if (path == NULL)
+        return -EINVAL;
+
+    if (build_path(upper_path, sizeof(upper_path), STATE->upper, path) < 0)
+        return -ENAMETOOLONG;
+
+    if (access(upper_path, F_OK) != 0) {
+        int ret = resolve_path(path, resolved, sizeof(resolved));
+        if (ret == 0) {
+            ret = copy_to_upper(path);
+            if (ret != 0) return ret;
+        } else {
+            return -ENOENT;
+        }
+    }
+
+    if (truncate(upper_path, size) == -1)
+        return -errno;
+
+    LOG("truncate: %s to %lld bytes", path, (long long)size);
+    return 0;
+}
+
 /* ── FUSE operations table ── */
 struct fuse_operations unionfs_oper = {
-    .getattr  = unionfs_getattr,
-    .readdir  = unionfs_readdir,
-    .create   = unionfs_create,
-    .open     = unionfs_open,
-    .read     = unionfs_read,
-    .write    = unionfs_write,
-    .release  = unionfs_release,
-    .unlink   = unionfs_unlink,
-    .mkdir    = unionfs_mkdir,
-    .rmdir    = unionfs_rmdir,
-};
+    .getattr        = unionfs_getattr,
+    .readdir        = unionfs_readdir,
+    .create         = unionfs_create,
+    .open           = unionfs_open,
+    .read           = unionfs_read,
+    .write          = unionfs_write,
+    .release        = unionfs_release,
+    .unlink         = unionfs_unlink,
+    .mkdir          = unionfs_mkdir,
+    .rmdir          = unionfs_rmdir,
+    .setxattr       = unionfs_setxattr,
+    .getxattr       = unionfs_getxattr,
+    .listxattr      = unionfs_listxattr,
+    .removexattr    = unionfs_removexattr,
+    .truncate       = unionfs_truncate,
+  };
